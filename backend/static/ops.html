@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>HappyRobot Logistics — Carrier Desk Ops</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f6f7f9; color: #1a1d21; }
+  header { background: #111827; color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+  .kpi { background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+  .kpi .value { font-size: 26px; font-weight: 700; }
+  .kpi .label { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+  th, td { padding: 10px 12px; text-align: left; font-size: 13px; border-bottom: 1px solid #eef0f2; white-space: nowrap; }
+  th { background: #f9fafb; color: #6b7280; text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; }
+  tr:last-child td { border-bottom: none; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.booked { background: #dcfce7; color: #166534; }
+  .badge.rejected, .badge.booking_failed, .badge.negotiation_failed { background: #fee2e2; color: #991b1b; }
+  .badge.needs_review { background: #ffedd5; color: #9a3412; }
+  .badge.counter { background: #fef9c3; color: #854d0e; }
+  .badge.pending, .badge.none { background: #e5e7eb; color: #374151; }
+  #gate { position: fixed; inset: 0; background: white; display: flex; align-items: center; justify-content: center; }
+  #gate input { padding: 8px 12px; font-size: 14px; border: 1px solid #d1d5db; border-radius: 6px; width: 320px; }
+  #gate button { padding: 8px 16px; margin-left: 8px; border: none; border-radius: 6px; background: #111827; color: white; cursor: pointer; }
+  .empty { padding: 40px; text-align: center; color: #6b7280; }
+  .refresh-note { font-size: 12px; color: #6b7280; margin-bottom: 8px; }
+  td button { font-size: 12px; padding: 4px 10px; border: 1px solid #d1d5db; border-radius: 6px; background: white; cursor: pointer; }
+  td button:hover { background: #f3f4f6; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <form id="gate-form">
+    <label>API token: <input id="token-input" type="password" placeholder="Bearer token" autofocus /></label>
+    <button type="submit">Enter</button>
+  </form>
+</div>
+
+<header>
+  <h1>Carrier Desk — Ops Dashboard</h1>
+  <span id="status" style="font-size: 12px; color: #9ca3af;"></span>
+</header>
+
+<main>
+  <div class="kpis" id="kpis"></div>
+  <div class="refresh-note">Auto-refreshes every 10s. Local mirror of call activity for ops visibility — Twin remains the system of record.</div>
+  <div id="table-wrap"></div>
+</main>
+
+<script>
+const TOKEN_KEY = "ops_api_token";
+
+function fmtBadge(outcome) {
+  const cls = outcome || "pending";
+  return `<span class="badge ${cls}">${outcome || "in progress"}</span>`;
+}
+
+function fmtMoney(v) {
+  return v == null ? "—" : "$" + Number(v).toLocaleString();
+}
+
+function fmtTime(ts) {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleString();
+}
+
+async function authedFetch(path, options = {}) {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const res = await fetch(path, {
+    ...options,
+    headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+  });
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    document.getElementById("gate").style.display = "flex";
+    throw new Error("unauthorized");
+  }
+  return res.json();
+}
+
+async function toggleFlag(callId, flagged) {
+  await authedFetch(`/ops/calls/${encodeURIComponent(callId)}/flag`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ flagged }),
+  });
+  refresh();
+}
+window.toggleFlag = toggleFlag;
+
+function renderKpis(summary) {
+  const items = [
+    { label: "Total Calls", value: summary.total_calls ?? "—" },
+    { label: "Booked", value: summary.booked ?? "—" },
+    { label: "Booking Rate", value: summary.booking_rate != null ? (summary.booking_rate * 100).toFixed(0) + "%" : "—" },
+    { label: "Negotiation Failed", value: summary.negotiation_failed ?? "—" },
+    { label: "MC Active Rate", value: summary.mc_verification_active_rate != null ? (summary.mc_verification_active_rate * 100).toFixed(0) + "%" : "—" },
+    { label: "Avg Negotiation Rounds", value: summary.avg_negotiation_rounds ?? "—" },
+    { label: "Flagged For Review", value: summary.flagged_for_review ?? "—" },
+  ];
+  document.getElementById("kpis").innerHTML = items.map(i =>
+    `<div class="kpi"><div class="value">${i.value}</div><div class="label">${i.label}</div></div>`
+  ).join("");
+}
+
+function renderTable(calls) {
+  const wrap = document.getElementById("table-wrap");
+  if (!calls.length) {
+    wrap.innerHTML = `<div class="empty">No calls logged yet.</div>`;
+    return;
+  }
+  const rows = calls.map(c => `
+    <tr>
+      <td>${fmtTime(c.updated_at)}</td>
+      <td>${c.mc_number ?? "—"}</td>
+      <td>${c.carrier_legal_name ?? "—"}</td>
+      <td>${c.fmcsa_status ?? "—"}</td>
+      <td>${c.otp_verified ? "✅" : (c.otp_attempts ? "❌" : "—")}</td>
+      <td>${c.load_id ?? "—"}</td>
+      <td>${fmtMoney(c.loadboard_rate)}</td>
+      <td>${c.negotiation_rounds ?? 0}</td>
+      <td>${fmtMoney(c.agreed_rate)}</td>
+      <td>${fmtBadge(c.outcome)}${c.flagged ? ' <span class="badge needs_review">flagged</span>' : ""}</td>
+      <td>${c.booking_ref ?? "—"}</td>
+      <td><button onclick="toggleFlag('${c.call_id}', ${c.flagged ? "false" : "true"})">${c.flagged ? "Unflag" : "Flag for review"}</button></td>
+    </tr>
+  `).join("");
+  wrap.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Updated</th><th>MC #</th><th>Carrier</th><th>FMCSA</th><th>OTP</th>
+        <th>Load</th><th>List Rate</th><th>Rounds</th><th>Agreed Rate</th><th>Outcome</th><th>Booking Ref</th><th>Action</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+async function refresh() {
+  try {
+    const [summary, callsResp] = await Promise.all([
+      authedFetch("/ops/summary"),
+      authedFetch("/ops/calls"),
+    ]);
+    renderKpis(summary);
+    renderTable(callsResp.calls);
+    document.getElementById("status").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    // unauthorized already handled in authedFetch
+  }
+}
+
+document.getElementById("gate-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const token = document.getElementById("token-input").value.trim();
+  if (!token) return;
+  localStorage.setItem(TOKEN_KEY, token);
+  document.getElementById("gate").style.display = "none";
+  refresh();
+});
+
+if (localStorage.getItem(TOKEN_KEY)) {
+  document.getElementById("gate").style.display = "none";
+  refresh();
+}
+setInterval(refresh, 10000);
+</script>
+
+</body>
+</html>
