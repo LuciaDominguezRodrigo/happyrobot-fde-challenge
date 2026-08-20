@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: happyrobot-fde-backend
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: API_AUTH_TOKEN
+        sync: false
+      - key: TMS_HOST
+        sync: false
+      - key: TMS_PORT
+        sync: false
+      - key: TMS_TOKEN
+        sync: false
+      - key: FMCSA_WEB_KEY
+        sync: false
