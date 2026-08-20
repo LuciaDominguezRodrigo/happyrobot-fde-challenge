@@ -97,6 +97,7 @@ def verify_carrier(req: VerifyCarrierRequest):
         "status": result.status.value,
         "legal_name": result.legal_name,
         "dot_number": result.dot_number,
+        "raw": result.raw,
     }
 
 
